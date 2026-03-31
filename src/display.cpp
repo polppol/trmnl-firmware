@@ -36,11 +36,14 @@ BBEPAPER bbep(EP75R_800x480);
 };
 BBEPAPER bbep(EP75YR_800x480);
 #elif defined(BOARD_SEEED_RETERMINAL_E1002)
-    {EP73_SPECTRA_800x480, EP73_SPECTRA_800x480}, // default (for original EPD)
-    {EP73_SPECTRA_800x480, EP73_SPECTRA_800x480}, // a = uses built-in fast + 4-gray
-    {EP73_SPECTRA_800x480, EP73_SPECTRA_800x480}, // b = darker grays
+    // WORKAROUND: Use EP75 mono panel type so display at least works (B/W only).
+    // EP73_SPECTRA_800x480 sends wrong PSR register and nothing draws.
+    // TODO: Replace with proper Spectra 6 init (see KB-eink-firmware-fork.md Approach A)
+    {EP75_800x480, EP75_800x480_4GRAY}, // default — fallback to mono
+    {EP75_800x480, EP75_800x480_4GRAY}, // a
+    {EP75_800x480, EP75_800x480_4GRAY}, // b
 };
-BBEPAPER bbep(EP73_SPECTRA_800x480);
+BBEPAPER bbep(EP75_800x480);
 #else
     {EP75_800x480, EP75_800x480_4GRAY}, // default (for original EPD)
     {EP75_800x480_GEN2, EP75_800x480_4GRAY_GEN2}, // a = uses built-in fast + 4-gray
@@ -1210,7 +1213,9 @@ PNG *png = new PNG();
             Log_info("%s [%d]: Decoding %d-bpp png (current)\r\n", __FILE__, __LINE__, png->getBpp());
             // Prepare target memory window (entire display)
 #ifdef BB_EPAPER
-#ifdef BOARD_SEEED_RETERMINAL_E1002
+// WORKAROUND: Spectra 6 decode disabled — using mono panel type until proper fix
+// TODO: Re-enable with correct PSR init (see KB-eink-firmware-fork.md Approach A)
+#if 0 // was: #ifdef BOARD_SEEED_RETERMINAL_E1002
             CreateSpectra6Pal(); // create a fast color matching palette
             if (bbep.allocBuffer() != BBEP_SUCCESS) {
                 Log_error("%s [%d]: bbep.AllocBuffer failed!\n\r", __FILE__, __LINE__);
