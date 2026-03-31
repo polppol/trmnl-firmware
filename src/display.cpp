@@ -36,14 +36,11 @@ BBEPAPER bbep(EP75R_800x480);
 };
 BBEPAPER bbep(EP75YR_800x480);
 #elif defined(BOARD_SEEED_RETERMINAL_E1002)
-    // WORKAROUND: Use EP75 mono panel type so display at least works (B/W only).
-    // EP73_SPECTRA_800x480 sends wrong PSR register and nothing draws.
-    // TODO: Replace with proper Spectra 6 init (see KB-eink-firmware-fork.md Approach A)
-    {EP75_800x480, EP75_800x480_4GRAY}, // default — fallback to mono
-    {EP75_800x480, EP75_800x480_4GRAY}, // a
-    {EP75_800x480, EP75_800x480_4GRAY}, // b
+    {EP73_SPECTRA_800x480, EP73_SPECTRA_800x480}, // default (Spectra 6)
+    {EP73_SPECTRA_800x480, EP73_SPECTRA_800x480}, // a
+    {EP73_SPECTRA_800x480, EP73_SPECTRA_800x480}, // b
 };
-BBEPAPER bbep(EP75_800x480);
+BBEPAPER bbep(EP73_SPECTRA_800x480);
 #else
     {EP75_800x480, EP75_800x480_4GRAY}, // default (for original EPD)
     {EP75_800x480_GEN2, EP75_800x480_4GRAY_GEN2}, // a = uses built-in fast + 4-gray
@@ -98,6 +95,135 @@ static uint8_t *pDither;
 
 // Runtime control for light sleep (true = enabled, false = disabled)
 static bool g_light_sleep_enabled = true;
+
+#ifdef BOARD_SEEED_RETERMINAL_E1002
+//
+// E1002 Spectra 6 display update using the exact sequence from esp32-photoframe.
+// bb_epaper's refresh() doesn't work because it sends PON before data,
+// but the ED2208-GCA controller needs: RESET → INIT → DATA → PON → DRF → POFF → SLEEP
+//
+void spectra6_update(void)
+{
+    Log_info("spectra6_update: start");
+    Log_info("BUSY pin %d reads: %d", EPD_BUSY_PIN, digitalRead(EPD_BUSY_PIN));
+
+    // Hardware reset — toggle RST pin directly (same as esp32-photoframe)
+    Log_info("spectra6_update: hardware reset");
+    digitalWrite(EPD_RST_PIN, HIGH);
+    delay(50);
+    digitalWrite(EPD_RST_PIN, LOW);
+    delay(20);
+    digitalWrite(EPD_RST_PIN, HIGH);
+    delay(50);
+    Log_info("BUSY after reset: %d", digitalRead(EPD_BUSY_PIN));
+
+    // Wait for BUSY to go HIGH (idle) after reset
+    int timeout = 0;
+    while (digitalRead(EPD_BUSY_PIN) == LOW && timeout < 5000) {
+        delay(10);
+        timeout += 10;
+    }
+    Log_info("BUSY settled after %dms: %d", timeout, digitalRead(EPD_BUSY_PIN));
+
+    // Send init sequence via bb_epaper's SPI API
+    Log_info("spectra6_update: sending init");
+    uint8_t d[6];
+
+    // CMDH
+    d[0]=0x49; d[1]=0x55; d[2]=0x20; d[3]=0x08; d[4]=0x09; d[5]=0x18;
+    bbep.writeCmd(0xAA); bbep.writeData(d, 6);
+    // PWRR
+    d[0]=0x3F;
+    bbep.writeCmd(0x01); bbep.writeData(d, 1);
+    // PSR
+    d[0]=0x5F; d[1]=0x69;
+    bbep.writeCmd(0x00); bbep.writeData(d, 2);
+    // POFS
+    d[0]=0x00; d[1]=0x54; d[2]=0x00; d[3]=0x44;
+    bbep.writeCmd(0x03); bbep.writeData(d, 4);
+    // BTST1
+    d[0]=0x40; d[1]=0x1F; d[2]=0x1F; d[3]=0x2C;
+    bbep.writeCmd(0x05); bbep.writeData(d, 4);
+    // BTST2
+    d[0]=0x6F; d[1]=0x1F; d[2]=0x17; d[3]=0x49;
+    bbep.writeCmd(0x06); bbep.writeData(d, 4);
+    // BTST3
+    d[0]=0x6F; d[1]=0x1F; d[2]=0x1F; d[3]=0x22;
+    bbep.writeCmd(0x08); bbep.writeData(d, 4);
+    // PLL
+    d[0]=0x03;
+    bbep.writeCmd(0x30); bbep.writeData(d, 1);
+    // CDI
+    d[0]=0x3F;
+    bbep.writeCmd(0x50); bbep.writeData(d, 1);
+    // TCON
+    d[0]=0x02; d[1]=0x00;
+    bbep.writeCmd(0x60); bbep.writeData(d, 2);
+    // TRES (800x480)
+    d[0]=0x03; d[1]=0x20; d[2]=0x01; d[3]=0xE0;
+    bbep.writeCmd(0x61); bbep.writeData(d, 4);
+    // T_VDCS
+    d[0]=0x01;
+    bbep.writeCmd(0x84); bbep.writeData(d, 1);
+    // PWS
+    d[0]=0x2F;
+    bbep.writeCmd(0xE3); bbep.writeData(d, 1);
+
+    Log_info("BUSY after init: %d", digitalRead(EPD_BUSY_PIN));
+
+    // Send image data (cmd 0x10)
+    Log_info("spectra6_update: sending data");
+    bbep.writePlane(PLANE_0);
+    Log_info("BUSY after data: %d", digitalRead(EPD_BUSY_PIN));
+
+    // PON (power on) — AFTER data, per esp32-photoframe
+    Log_info("spectra6_update: power on (cmd 0x04)");
+    bbep.writeCmd(0x04);
+    delay(10);
+    Log_info("BUSY after PON: %d", digitalRead(EPD_BUSY_PIN));
+
+    // Manual busy wait for PON
+    timeout = 0;
+    while (digitalRead(EPD_BUSY_PIN) == LOW && timeout < 10000) {
+        delay(10);
+        timeout += 10;
+    }
+    Log_info("PON busy wait: %dms, BUSY=%d", timeout, digitalRead(EPD_BUSY_PIN));
+
+    // DRF (display refresh)
+    Log_info("spectra6_update: display refresh (cmd 0x12)");
+    d[0] = 0x00;
+    bbep.writeCmd(0x12); bbep.writeData(d, 1);
+    delay(10);
+    Log_info("BUSY after DRF: %d", digitalRead(EPD_BUSY_PIN));
+
+    // Manual busy wait for refresh — should take 15-30 seconds
+    timeout = 0;
+    while (digitalRead(EPD_BUSY_PIN) == LOW && timeout < 60000) {
+        delay(100);
+        timeout += 100;
+        if (timeout % 5000 == 0) {
+            Log_info("  refresh waiting... %ds", timeout/1000);
+        }
+    }
+    Log_info("DRF busy wait: %dms, BUSY=%d", timeout, digitalRead(EPD_BUSY_PIN));
+
+    // POFF (power off)
+    d[0] = 0x00;
+    bbep.writeCmd(0x02); bbep.writeData(d, 1);
+    timeout = 0;
+    while (digitalRead(EPD_BUSY_PIN) == LOW && timeout < 5000) {
+        delay(10);
+        timeout += 10;
+    }
+
+    // Deep sleep
+    d[0]=0xA5;
+    bbep.writeCmd(0x07); bbep.writeData(d, 1);
+
+    Log_info("spectra6_update: done");
+}
+#endif // BOARD_SEEED_RETERMINAL_E1002
 
 /**
  * @brief Function to init the display
@@ -512,17 +638,17 @@ unsigned char GetBWYRPixel(int r, int g, int b)
 #ifdef BOARD_SEEED_RETERMINAL_E1002
 //
 // bb_epaper colors to map to Spectra6 colors
-// The RGB values are not correct for the panel, but for simple mapping
-// these work best. These get mapped from bb_epaper color indices to
+// Measured RGB values from actual E1002 panel output (via esp32-photoframe project).
+// These get mapped from bb_epaper color indices to
 // Spectra6 color indices by the setPixel() method.
 //
 const int iSpectraRGB[] = { // r, g, b
-    0, 0, 0, // black = 0
-    192,192,192, // white = 1
-    192,192,0, // yellow = 2
-    192,0,0, // red = 3
-    0,0,192, // blue = 4
-    0,192,0, // green = 5
+    2, 2, 2,       // black = 0
+    190, 200, 200, // white = 1 (actual display is darker than 255)
+    205, 202, 0,   // yellow = 2
+    135, 19, 0,    // red = 3 (much darker than theoretical)
+    5, 64, 158,    // blue = 4
+    39, 102, 60,   // green = 5 (very dark)
 };
 // Map the Spectra6 palette to the closest RGB333 values
 void CreateSpectra6Pal(void)
@@ -1213,9 +1339,7 @@ PNG *png = new PNG();
             Log_info("%s [%d]: Decoding %d-bpp png (current)\r\n", __FILE__, __LINE__, png->getBpp());
             // Prepare target memory window (entire display)
 #ifdef BB_EPAPER
-// WORKAROUND: Spectra 6 decode disabled — using mono panel type until proper fix
-// TODO: Re-enable with correct PSR init (see KB-eink-firmware-fork.md Approach A)
-#if 0 // was: #ifdef BOARD_SEEED_RETERMINAL_E1002
+#ifdef BOARD_SEEED_RETERMINAL_E1002
             CreateSpectra6Pal(); // create a fast color matching palette
             if (bbep.allocBuffer() != BBEP_SUCCESS) {
                 Log_error("%s [%d]: bbep.AllocBuffer failed!\n\r", __FILE__, __LINE__);
@@ -1225,7 +1349,7 @@ PNG *png = new PNG();
             png->openRAM((uint8_t *)pPNG, iDataSize, png_draw_6clr);
             png->decode(NULL, 0);
             png->close();
-            bbep.writePlane();
+            // Don't call writePlane here — spectra6_update() in display_show_image handles the full cycle
             free(png); // free the decoder instance
             return REFRESH_FULL;
 #endif // E1002
@@ -1370,10 +1494,18 @@ void display_show_image(uint8_t *image_buffer, int data_size, bool bWait)
         }
         else
         {
+#ifdef BOARD_SEEED_RETERMINAL_E1002
+         // Spectra 6 uses 4-bpp buffer; raw 1-bpp BMP can't be set directly.
+         // Fill white — PNG/JPEG images go through png_draw_6clr instead.
+            bbep.allocBuffer(false);
+            bAlloc = true;
+            bbep.fillScreen(BBEP_WHITE);
+#else
          // This work-around is due to a lack of RAM; the correct method would be to use loadBMP()
             flip_image(image_buffer+62, bbep.width(), bbep.height(), false); // fix bottom-up bitmap images
 #ifdef BB_EPAPER
             bbep.setBuffer(image_buffer+62); // uncompressed 1-bpp bitmap
+#endif
 #endif
         }
 #ifdef BB_EPAPER
@@ -1407,7 +1539,11 @@ void display_show_image(uint8_t *image_buffer, int data_size, bool bWait)
     if (!bWait) iRefreshMode = REFRESH_PARTIAL; // fast update when showing loading screen
     Log_info("%s [%d]: EPD refresh mode: %d\r\n", __FILE__, __LINE__, iRefreshMode);
     bbep.setLightSleep(true);
+#ifdef BOARD_SEEED_RETERMINAL_E1002
+    spectra6_update();
+#else
     bbep.refresh(iRefreshMode, bWait);
+#endif
     if ((bbep.getPanelType() == EP426_800x480 || bbep.getPanelType() == EP397_800x480) && iRefreshMode == REFRESH_PARTIAL) {
         i426Workaround = 1; // need to re-initialize the controller for another update before sleeping
     }
@@ -1482,7 +1618,11 @@ void display_show_msg(uint8_t *image_buffer, MSG message_type)
     else
     {
 #ifdef BB_EPAPER
+#ifndef BOARD_SEEED_RETERMINAL_E1002
         if (image_buffer) memcpy(bbep.getBuffer(), image_buffer+62, Imagesize); // uncompressed 1-bpp bitmap
+#else
+        bbep.fillScreen(BBEP_WHITE); // Spectra 6 uses 4-bpp buffer; can't memcpy 1-bpp BMP
+#endif
 #endif
     }
 
@@ -1813,7 +1953,11 @@ void display_show_msg_qa(uint8_t *image_buffer, const float *voltage, const floa
     else
     {
 #ifdef BB_EPAPER
+#ifndef BOARD_SEEED_RETERMINAL_E1002
         memcpy(bbep.getBuffer(), image_buffer+62, Imagesize); // uncompressed 1-bpp bitmap
+#else
+        bbep.fillScreen(BBEP_WHITE); // Spectra 6 uses 4-bpp buffer; can't memcpy 1-bpp BMP
+#endif
 #endif
     }
 
@@ -1907,12 +2051,16 @@ void display_show_msg(uint8_t *image_buffer, MSG message_type, String friendly_i
         Log_info("Display set to white");
         bbep.fillScreen(BBEP_WHITE);
 #ifdef BB_EPAPER
+#ifdef BOARD_SEEED_RETERMINAL_E1002
+        spectra6_update();
+#else
         bbep.writePlane(PLANE_0);
         if (!apiDisplayResult.response.maximum_compatibility) {
-            bbep.refresh(REFRESH_FAST, true); // newer panel can handle the fast refresh
+            bbep.refresh(REFRESH_FAST, true);
         } else {
-            bbep.refresh(REFRESH_FULL, true); // incompatible panel (for now)
+            bbep.refresh(REFRESH_FULL, true);
         }
+#endif
 #else
         bbep.fullUpdate();
 #endif
@@ -1942,7 +2090,11 @@ void display_show_msg(uint8_t *image_buffer, MSG message_type, String friendly_i
     else
     {
 #ifdef BB_EPAPER
+#ifndef BOARD_SEEED_RETERMINAL_E1002
         if (image_buffer) memcpy(bbep.getBuffer(), image_buffer+62, Imagesize); // uncompressed 1-bpp bitmap
+#else
+        bbep.fillScreen(BBEP_WHITE); // Spectra 6 uses 4-bpp buffer; can't memcpy 1-bpp BMP
+#endif
 #endif
     }
 
@@ -2021,8 +2173,12 @@ void display_show_msg(uint8_t *image_buffer, MSG message_type, String friendly_i
     }
     Log_info("Start drawing...");
 #ifdef BB_EPAPER
+#ifdef BOARD_SEEED_RETERMINAL_E1002
+    spectra6_update();
+#else
     bbep.writePlane(PLANE_0);
     bbep.refresh(REFRESH_FULL, true);
+#endif
     bbep.freeBuffer();
 #else
     bbep.fullUpdate();
