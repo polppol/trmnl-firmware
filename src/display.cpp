@@ -744,59 +744,108 @@ unsigned char GetBWYRPixel(int r, int g, int b)
 } /* GetBWYRPixel() */
 #ifdef BOARD_SEEED_RETERMINAL_E1002
 //
-// bb_epaper colors to map to Spectra6 colors
-// Measured RGB values from actual E1002 panel output (via esp32-photoframe project).
-// These get mapped from bb_epaper color indices to
-// Spectra6 color indices by the setPixel() method.
+// Spectra 6 measured palette (from esp32-photoframe actual display measurements)
 //
-const int iSpectraRGB[] = { // r, g, b
-    2, 2, 2,       // black = 0
-    190, 200, 200, // white = 1 (actual display is darker than 255)
-    205, 202, 0,   // yellow = 2
-    135, 19, 0,    // red = 3 (much darker than theoretical)
-    5, 64, 158,    // blue = 4
-    39, 102, 60,   // green = 5 (very dark)
+static const int16_t spectra6_palette[6][3] = {
+    {  2,   2,   2},   // 0 = Black
+    {179, 182, 171},   // 1 = White
+    {205, 202,   0},   // 2 = Yellow
+    {117,  10,   0},   // 3 = Red
+    {  0,  47, 107},   // 4 = Blue
+    { 33,  69,  40},   // 5 = Green
 };
-// Map the Spectra6 palette to the closest RGB333 values
-void CreateSpectra6Pal(void)
-{
-    int i, j;
-    int r, g, b, r1, g1, b1;
-    int dist, min_dist, min_index;
 
-    for (i=0; i<512; i++) { // RGB333
-        r = (i & 7)*36;
-        g = ((i >> 3) & 7)*36;
-        b = (i >> 6)*36;
-        min_dist = 0x7fffffff;
-        min_index = 0;
-        for (j=0; j<6; j++) { // match to the closes Spectra6 color
-            r1 = iSpectraRGB[j*3];
-            g1 = iSpectraRGB[j*3+1];
-            b1 = iSpectraRGB[j*3+2];
-            dist = (r - r1) * (r - r1); // delta red squared
-            dist += (g - g1) * (g - g1); // delta green squared
-            dist += (b - b1) * (b - b1); // delta blue squared
-            if (dist < min_dist) {
-                min_dist = dist;
-                min_index = j;
-            }
-        } // for j
-        u8SpectraPal[i] = min_index; // best match palette index for this RGB333 color
-    } // for i
-} /* CreateSpectra6Pal() */
-//
-// Convert the RGB value into one of 6 Spectra6 colors
-//
+// Find closest Spectra 6 color (Euclidean distance in RGB)
+static uint8_t spectra6_find_closest(int16_t r, int16_t g, int16_t b)
+{
+    int min_dist = 0x7FFFFFFF;
+    uint8_t best = 0;
+    for (int i = 0; i < 6; i++) {
+        int dr = r - spectra6_palette[i][0];
+        int dg = g - spectra6_palette[i][1];
+        int db = b - spectra6_palette[i][2];
+        int dist = dr*dr + dg*dg + db*db;
+        if (dist < min_dist) { min_dist = dist; best = i; }
+    }
+    return best;
+}
+
+// Clamp value to 0-255
+static inline int16_t clamp8(int16_t v) { return v < 0 ? 0 : (v > 255 ? 255 : v); }
+
+// Floyd-Steinberg error diffusion buffer for PNG line-by-line decode
+static int16_t *fs_err_cur = NULL;  // current row error [width * 3] (R,G,B)
+static int16_t *fs_err_next = NULL; // next row error [width * 3]
+static int fs_width = 0;
+
+static void spectra6_fs_init(int width)
+{
+    fs_width = width;
+    fs_err_cur = (int16_t *)calloc(width * 3, sizeof(int16_t));
+    fs_err_next = (int16_t *)calloc(width * 3, sizeof(int16_t));
+}
+
+static void spectra6_fs_free(void)
+{
+    if (fs_err_cur) { free(fs_err_cur); fs_err_cur = NULL; }
+    if (fs_err_next) { free(fs_err_next); fs_err_next = NULL; }
+    fs_width = 0;
+}
+
+// Process one row with Floyd-Steinberg dithering, write to framebuffer
+static void spectra6_fs_dither_row(int y, const uint8_t *rgb_row, int width)
+{
+    if (!fs_err_cur || !fs_err_next) return;
+
+    for (int x = 0; x < width; x++) {
+        // Original pixel + accumulated error
+        int16_t r = clamp8(rgb_row[x*3 + 0] + fs_err_cur[x*3 + 0]);
+        int16_t g = clamp8(rgb_row[x*3 + 1] + fs_err_cur[x*3 + 1]);
+        int16_t b = clamp8(rgb_row[x*3 + 2] + fs_err_cur[x*3 + 2]);
+
+        // Find nearest palette color
+        uint8_t ci = spectra6_find_closest(r, g, b);
+        bbep.drawPixel(x, y, ci);
+
+        // Quantization error
+        int16_t er = r - spectra6_palette[ci][0];
+        int16_t eg = g - spectra6_palette[ci][1];
+        int16_t eb = b - spectra6_palette[ci][2];
+
+        // Floyd-Steinberg diffusion: right (7/16), below-left (3/16), below (5/16), below-right (1/16)
+        if (x + 1 < width) {
+            fs_err_cur[(x+1)*3 + 0] += er * 7 / 16;
+            fs_err_cur[(x+1)*3 + 1] += eg * 7 / 16;
+            fs_err_cur[(x+1)*3 + 2] += eb * 7 / 16;
+        }
+        if (x > 0) {
+            fs_err_next[(x-1)*3 + 0] += er * 3 / 16;
+            fs_err_next[(x-1)*3 + 1] += eg * 3 / 16;
+            fs_err_next[(x-1)*3 + 2] += eb * 3 / 16;
+        }
+        fs_err_next[x*3 + 0] += er * 5 / 16;
+        fs_err_next[x*3 + 1] += eg * 5 / 16;
+        fs_err_next[x*3 + 2] += eb * 5 / 16;
+        if (x + 1 < width) {
+            fs_err_next[(x+1)*3 + 0] += er * 1 / 16;
+            fs_err_next[(x+1)*3 + 1] += eg * 1 / 16;
+            fs_err_next[(x+1)*3 + 2] += eb * 1 / 16;
+        }
+    }
+
+    // Swap buffers: next becomes current, clear next
+    int16_t *tmp = fs_err_cur;
+    fs_err_cur = fs_err_next;
+    fs_err_next = tmp;
+    memset(fs_err_next, 0, width * 3 * sizeof(int16_t));
+}
+
+// Legacy simple nearest-neighbor (kept for reference / non-dithered use)
 uint8_t GetSpectraPixel(int r, int g, int b)
 {
-uint8_t c;
-uint16_t rgb333;
-
-    rgb333 = (r>>5) + ((g & 0xe0) >> 2) + ((b & 0xe0) << 1);
-    c = u8SpectraPal[rgb333];
-    return c;
-} /* GetSpectraPixel() */
+    return spectra6_find_closest(r, g, b);
+}
+void CreateSpectra6Pal(void) { /* no-op — using direct palette lookup now */ }
 #endif // E1002
 /**
  * @brief Callback function for each line of PNG decoded
@@ -806,103 +855,76 @@ uint16_t rgb333;
 #ifdef BB_EPAPER
 #ifdef BOARD_SEEED_RETERMINAL_E1002
 //
-// Draw the PNG image into the local framebuffer memory using the drawPixel() method
-// to do color translation and to properly format the memory layout
+// PNG line callback with Floyd-Steinberg dithering for Spectra 6.
+// Extracts RGB from any PNG format, then dithers each row.
 //
+static uint8_t *fs_rgb_row = NULL; // temp RGB row buffer
+
 int png_draw_6clr(PNGDRAW *pDraw)
 {
     uint8_t r=0, g=0, b=0, *s, *pPal, *pPalette = pDraw->pPalette;
-    int x, y, iDelta, iBpp = pDraw->iBpp;
-    y = pDraw->y;
+    int x, iDelta, iBpp = pDraw->iBpp;
+    int y = pDraw->y;
+    int w = pDraw->iWidth;
+
     switch (pDraw->iPixelType) {
-        case PNG_PIXEL_INDEXED:
-            break;
+        case PNG_PIXEL_INDEXED: break;
         case PNG_PIXEL_TRUECOLOR:
-	        if (iBpp <= 8) {
-                iBpp *= 3;
-	        }
-            pPalette = NULL;
-            break;
+            if (iBpp <= 8) iBpp *= 3;
+            pPalette = NULL; break;
         case PNG_PIXEL_TRUECOLOR_ALPHA:
-	        if (iBpp <= 8) {
-                iBpp *= 4;
-	        }
-            pPalette = NULL;
-            break;
+            if (iBpp <= 8) iBpp *= 4;
+            pPalette = NULL; break;
         case PNG_PIXEL_GRAYSCALE:
-            pPalette = NULL;
-            break;
-    } // switch on pixel type
+            pPalette = NULL; break;
+    }
     iDelta = iBpp/8;
     s = pDraw->pPixels;
-    for (x=0; x<pDraw->iWidth; x++) { // slower code, but less code :)
+
+    // Extract RGB into row buffer
+    if (!fs_rgb_row) fs_rgb_row = (uint8_t *)malloc(w * 3);
+    if (!fs_rgb_row) return 0;
+
+    for (x = 0; x < w; x++) {
         switch (iBpp) {
-            case 24:
-            case 32:
-                r = s[0];
-                g = s[1];
-                b = s[2];
-                s += iDelta;
-                break;
+            case 24: case 32:
+                r = s[0]; g = s[1]; b = s[2]; s += iDelta; break;
             case 16:
-                r = s[1] & 0xf8; // red
-                g = ((s[0] | s[1] << 8) >> 3) & 0xfc; // green
-                b = s[0] << 3;
-                s += 2;
+                r = s[1] & 0xf8; g = ((s[0] | s[1] << 8) >> 3) & 0xfc; b = s[0] << 3;
+                s += 2; break;
+            case 8:
+                if (pPalette) { pPal = &pPalette[s[0]*3]; r=pPal[0]; g=pPal[1]; b=pPal[2]; }
+                else { r = g = b = s[0]; }
+                s++; break;
+            case 4:
+                if (pPalette) {
+                    if (x&1) { pPal=&pPalette[(s[0]&0xf)*3]; s++; }
+                    else { pPal=&pPalette[(s[0]>>4)*3]; }
+                    r=pPal[0]; g=pPal[1]; b=pPal[2];
+                } else {
+                    if (x&1) { r=g=b=(s[0]&0xf)|(s[0]<<4); s++; }
+                    else { r=g=b=(s[0]>>4)|(s[0]&0xf0); }
+                }
                 break;
-                case 8:
-                    if (pPalette) {
-                        pPal = &pPalette[s[0] * 3];
-                        r = pPal[0];
-                        g = pPal[1];
-                        b = pPal[2];
-                    } else {
-                        r = g = b = s[0];
-                    }
-                    s++;
-                    break;
-                case 4:
-                    if (pPalette) {
-                        if (x & 1) {
-                            pPal = &pPalette[(s[0] & 0xf) * 3];
-                            s++;
-                        } else {
-                            pPal = &pPalette[(s[0]>>4) * 3];
-                        }
-                        r = pPal[0];
-                        g = pPal[1];
-                        b = pPal[2];
-                    } else {
-                        if (x & 1) {
-                            r = g = b = (s[0] & 0xf) | (s[0] << 4);
-                            s++;
-                        } else {
-                            r = g = b = (s[0] >> 4) | (s[0] & 0xf0);
-                        }
-                    }
-                    break;
-		case 2:
-		    if (pPalette) {
-			pPal = &pPalette[((s[0] >> ((3-(x&3))*2)) & 3) * 3];
-			r = pPal[0]; g = pPal[1]; b = pPal[2];
-		    } else {
-			r = g = b = (s[0] << ((x&3)*2)) & 0xc0;
-		    }
-		    if ((x & 3) == 3) s++;
-		    break;
-                case 1:
-                    if (pPalette) {
-                        pPal = &pPalette[((s[0] >> (7-(x&7))) & 1) * 3];
-                        r = pPal[0]; g = pPal[1]; b = pPal[2];
-                    } else {
-                        r = g = b = ((s[0] << (x&7)) & 0x80);
-                    }
-                    if ((x & 7) == 7) s++;
-                    break;
-            } // switch on bpp
-            bbep.drawPixel(x, y, GetSpectraPixel(r, g, b));
-        } // for x
-    return 1; // continue decoding
+            case 2:
+                if (pPalette) { pPal=&pPalette[((s[0]>>((3-(x&3))*2))&3)*3]; r=pPal[0]; g=pPal[1]; b=pPal[2]; }
+                else { r=g=b=(s[0]<<((x&3)*2))&0xc0; }
+                if ((x&3)==3) s++;
+                break;
+            case 1:
+                if (pPalette) { pPal=&pPalette[((s[0]>>(7-(x&7)))&1)*3]; r=pPal[0]; g=pPal[1]; b=pPal[2]; }
+                else { r=g=b=((s[0]<<(x&7))&0x80); }
+                if ((x&7)==7) s++;
+                break;
+        }
+        fs_rgb_row[x*3+0] = r;
+        fs_rgb_row[x*3+1] = g;
+        fs_rgb_row[x*3+2] = b;
+    }
+
+    // Apply Floyd-Steinberg dithering to this row
+    spectra6_fs_dither_row(y, fs_rgb_row, w);
+    return 1;
 } /* png_draw_6clr() */
 #endif // E1002 (Spectra6 only)
 
@@ -1447,16 +1469,18 @@ PNG *png = new PNG();
             // Prepare target memory window (entire display)
 #ifdef BB_EPAPER
 #ifdef BOARD_SEEED_RETERMINAL_E1002
-            CreateSpectra6Pal(); // create a fast color matching palette
             if (bbep.allocBuffer() != BBEP_SUCCESS) {
                 Log_error("%s [%d]: bbep.AllocBuffer failed!\n\r", __FILE__, __LINE__);
                 return -1;
             }
-            Log_info("%s [%d]: decoding for 6-color EPD\r\n", __FILE__, __LINE__);
+            Log_info("%s [%d]: decoding for 6-color EPD with Floyd-Steinberg dithering\r\n", __FILE__, __LINE__);
+            spectra6_fs_init(png->getWidth());
             png->openRAM((uint8_t *)pPNG, iDataSize, png_draw_6clr);
             png->decode(NULL, 0);
             png->close();
-            free(png); // free the decoder instance
+            spectra6_fs_free();
+            if (fs_rgb_row) { free(fs_rgb_row); fs_rgb_row = NULL; }
+            free(png);
             return REFRESH_FULL;
 #endif // E1002
 #ifdef BOARD_TRMNL_4CLR
