@@ -100,153 +100,20 @@ static uint8_t *pDither;
 // Runtime control for light sleep (true = enabled, false = disabled)
 static bool g_light_sleep_enabled = true;
 
-// Spectra 6 custom update — disabled until EP73_SPECTRA init is fixed
-#if 0 // was: #ifdef BOARD_SEEED_RETERMINAL_E1002
-//
-// E1002 Spectra 6 display update using the exact sequence from esp32-photoframe.
-// bb_epaper's refresh() doesn't work because it sends PON before data,
-// but the ED2208-GCA controller needs: RESET → INIT → DATA → PON → DRF → POFF → SLEEP
-//
-void spectra6_update(void)
-{
-    Log_info("spectra6_update: start");
-    Log_info("BUSY pin %d reads: %d", EPD_BUSY_PIN, digitalRead(EPD_BUSY_PIN));
-
-    // Hardware reset — toggle RST pin directly (same as esp32-photoframe)
-    Log_info("spectra6_update: hardware reset");
-    digitalWrite(EPD_RST_PIN, HIGH);
-    delay(50);
-    digitalWrite(EPD_RST_PIN, LOW);
-    delay(20);
-    digitalWrite(EPD_RST_PIN, HIGH);
-    delay(50);
-    Log_info("BUSY after reset: %d", digitalRead(EPD_BUSY_PIN));
-
-    // Wait for BUSY to go HIGH (idle) after reset
-    int timeout = 0;
-    while (digitalRead(EPD_BUSY_PIN) == LOW && timeout < 5000) {
-        delay(10);
-        timeout += 10;
-    }
-    Log_info("BUSY settled after %dms: %d", timeout, digitalRead(EPD_BUSY_PIN));
-
-    // Send init sequence via bb_epaper's SPI API
-    Log_info("spectra6_update: sending init");
-    uint8_t d[6];
-
-    // CMDH
-    d[0]=0x49; d[1]=0x55; d[2]=0x20; d[3]=0x08; d[4]=0x09; d[5]=0x18;
-    bbep.writeCmd(0xAA); bbep.writeData(d, 6);
-    // PWRR
-    d[0]=0x3F;
-    bbep.writeCmd(0x01); bbep.writeData(d, 1);
-    // PSR
-    d[0]=0x5F; d[1]=0x69;
-    bbep.writeCmd(0x00); bbep.writeData(d, 2);
-    // POFS
-    d[0]=0x00; d[1]=0x54; d[2]=0x00; d[3]=0x44;
-    bbep.writeCmd(0x03); bbep.writeData(d, 4);
-    // BTST1
-    d[0]=0x40; d[1]=0x1F; d[2]=0x1F; d[3]=0x2C;
-    bbep.writeCmd(0x05); bbep.writeData(d, 4);
-    // BTST2
-    d[0]=0x6F; d[1]=0x1F; d[2]=0x17; d[3]=0x49;
-    bbep.writeCmd(0x06); bbep.writeData(d, 4);
-    // BTST3
-    d[0]=0x6F; d[1]=0x1F; d[2]=0x1F; d[3]=0x22;
-    bbep.writeCmd(0x08); bbep.writeData(d, 4);
-    // PLL
-    d[0]=0x03;
-    bbep.writeCmd(0x30); bbep.writeData(d, 1);
-    // CDI
-    d[0]=0x3F;
-    bbep.writeCmd(0x50); bbep.writeData(d, 1);
-    // TCON
-    d[0]=0x02; d[1]=0x00;
-    bbep.writeCmd(0x60); bbep.writeData(d, 2);
-    // TRES (800x480)
-    d[0]=0x03; d[1]=0x20; d[2]=0x01; d[3]=0xE0;
-    bbep.writeCmd(0x61); bbep.writeData(d, 4);
-    // T_VDCS
-    d[0]=0x01;
-    bbep.writeCmd(0x84); bbep.writeData(d, 1);
-    // PWS
-    d[0]=0x2F;
-    bbep.writeCmd(0xE3); bbep.writeData(d, 1);
-
-    Log_info("BUSY after init: %d", digitalRead(EPD_BUSY_PIN));
-
-    // Send image data (cmd 0x10)
-    Log_info("spectra6_update: sending data");
-    bbep.writePlane(PLANE_0);
-    Log_info("BUSY after data: %d", digitalRead(EPD_BUSY_PIN));
-
-    // PON (power on) — AFTER data, per esp32-photoframe
-    Log_info("spectra6_update: power on (cmd 0x04)");
-    bbep.writeCmd(0x04);
-    delay(10);
-    Log_info("BUSY after PON: %d", digitalRead(EPD_BUSY_PIN));
-
-    // Manual busy wait for PON
-    timeout = 0;
-    while (digitalRead(EPD_BUSY_PIN) == LOW && timeout < 10000) {
-        delay(10);
-        timeout += 10;
-    }
-    Log_info("PON busy wait: %dms, BUSY=%d", timeout, digitalRead(EPD_BUSY_PIN));
-
-    // DRF (display refresh)
-    Log_info("spectra6_update: display refresh (cmd 0x12)");
-    d[0] = 0x00;
-    bbep.writeCmd(0x12); bbep.writeData(d, 1);
-    delay(10);
-    Log_info("BUSY after DRF: %d", digitalRead(EPD_BUSY_PIN));
-
-    // Manual busy wait for refresh — should take 15-30 seconds
-    timeout = 0;
-    while (digitalRead(EPD_BUSY_PIN) == LOW && timeout < 60000) {
-        delay(100);
-        timeout += 100;
-        if (timeout % 5000 == 0) {
-            Log_info("  refresh waiting... %ds", timeout/1000);
-        }
-    }
-    Log_info("DRF busy wait: %dms, BUSY=%d", timeout, digitalRead(EPD_BUSY_PIN));
-
-    // POFF (power off)
-    d[0] = 0x00;
-    bbep.writeCmd(0x02); bbep.writeData(d, 1);
-    timeout = 0;
-    while (digitalRead(EPD_BUSY_PIN) == LOW && timeout < 5000) {
-        delay(10);
-        timeout += 10;
-    }
-
-    // Deep sleep
-    d[0]=0xA5;
-    bbep.writeCmd(0x07); bbep.writeData(d, 1);
-
-    Log_info("spectra6_update: done");
-}
-#endif // disabled Spectra 6 update
-
-/**
- * @brief Function to init the display
- * @param none
- * @return none
- */
-void display_init(void)
-{
-    Log_info("dev module start");
-    iTempProfile = preferences.getUInt(PREFERENCES_TEMP_PROFILE, TEMP_PROFILE_DEFAULT);
-    Log_info("Saved temperature profile: %d", iTempProfile);
-#ifdef BB_EPAPER
-    // E1002: ESP-IDF SPI driver (matching esp32-photoframe exactly)
 #ifdef BOARD_SEEED_RETERMINAL_E1002
-    {
-    Log_info("E1002: ESP-IDF SPI driver test");
+//
+// E1002 Spectra 6 display update using ESP-IDF SPI driver.
+// Arduino SPI (bb_epaper) does NOT work on this hardware — requires
+// SPI_DEVICE_HALFDUPLEX | SPI_DEVICE_NO_DUMMY flags.
+// Reads bb_epaper's 4bpp framebuffer and sends via ESP-IDF SPI.
+//
+static spi_device_handle_t s_epd_spi = NULL;
 
-    // GPIO setup (matching esp32-photoframe)
+static void spectra6_spi_init(void)
+{
+    if (s_epd_spi) return; // already initialized
+
+    // GPIO setup
     gpio_config_t out_conf = {};
     out_conf.pin_bit_mask = (1ULL << EPD_RST_PIN) | (1ULL << EPD_DC_PIN) | (1ULL << EPD_CS_PIN);
     out_conf.mode = GPIO_MODE_OUTPUT;
@@ -259,9 +126,7 @@ void display_init(void)
     gpio_config(&in_conf);
     gpio_set_level((gpio_num_t)EPD_CS_PIN, 1);
     gpio_set_level((gpio_num_t)EPD_DC_PIN, 0);
-    gpio_set_level((gpio_num_t)EPD_RST_PIN, 1);
 
-    // SPI bus init
     spi_bus_config_t buscfg = {};
     buscfg.mosi_io_num = EPD_MOSI_PIN;
     buscfg.miso_io_num = -1;
@@ -270,19 +135,42 @@ void display_init(void)
     buscfg.quadhd_io_num = -1;
     buscfg.max_transfer_sz = 4096;
     esp_err_t ret = spi_bus_initialize(SPI2_HOST, &buscfg, SPI_DMA_CH_AUTO);
-    Log_info("E1002: spi_bus_init=%s", esp_err_to_name(ret));
+    if (ret != ESP_OK) {
+        Log_info("spectra6: spi_bus_init failed: %s", esp_err_to_name(ret));
+        return;
+    }
 
-    spi_device_handle_t spi_dev;
     spi_device_interface_config_t devcfg = {};
     devcfg.clock_speed_hz = 20 * 1000 * 1000;
     devcfg.mode = 0;
     devcfg.spics_io_num = -1;
     devcfg.queue_size = 1;
     devcfg.flags = SPI_DEVICE_HALFDUPLEX | SPI_DEVICE_NO_DUMMY;
-    ret = spi_bus_add_device(SPI2_HOST, &devcfg, &spi_dev);
-    Log_info("E1002: spi_add_device=%s", esp_err_to_name(ret));
+    spi_bus_add_device(SPI2_HOST, &devcfg, &s_epd_spi);
+    Log_info("spectra6: SPI initialized");
+}
 
-    // spi_write: send data buffer via ESP-IDF SPI
+static void spectra6_wait_busy(const char *label)
+{
+    vTaskDelay(pdMS_TO_TICKS(10));
+    int wc = 0;
+    while (gpio_get_level((gpio_num_t)EPD_BUSY_PIN) == 0) {
+        vTaskDelay(pdMS_TO_TICKS(10));
+        if (++wc > 6000) {
+            Log_info("spectra6 [%s] BUSY timeout", label);
+            return;
+        }
+    }
+}
+
+void spectra6_update(void)
+{
+    Log_info("spectra6_update: start");
+    spectra6_spi_init();
+    if (!s_epd_spi) { Log_info("spectra6_update: SPI not available"); return; }
+    spi_device_handle_t spi_dev = s_epd_spi;
+
+    // SPI helpers (matching esp32-photoframe)
     auto spi_wr = [&spi_dev](const uint8_t *data, int len) {
         spi_transaction_t t = {};
         t.length = len * 8;
@@ -290,12 +178,10 @@ void display_init(void)
         spi_device_polling_transmit(spi_dev, &t);
     };
 
-    // cmd_data: matching esp32-photoframe exactly
     auto cmd_data = [&spi_dev, &spi_wr](uint8_t cmd, const uint8_t *data, size_t len) {
         gpio_set_level((gpio_num_t)EPD_DC_PIN, 0);
         spi_device_acquire_bus(spi_dev, portMAX_DELAY);
         gpio_set_level((gpio_num_t)EPD_CS_PIN, 0);
-        // Send command using variable-length command field
         spi_transaction_ext_t cmd_t = {};
         cmd_t.command_bits = 8;
         cmd_t.base.flags = SPI_TRANS_VARIABLE_CMD;
@@ -313,18 +199,6 @@ void display_init(void)
 
     auto send_cmd = [&cmd_data](uint8_t cmd) { cmd_data(cmd, NULL, 0); };
 
-    // wait_busy: matching esp32-photoframe
-    auto wait_busy = [](const char *label) {
-        vTaskDelay(pdMS_TO_TICKS(10));
-        int wc = 0;
-        while (gpio_get_level((gpio_num_t)EPD_BUSY_PIN) == 0) {
-            vTaskDelay(pdMS_TO_TICKS(10));
-            if (++wc > 4000) { Log_info("E1002: [%s] timeout 40s", label); return; }
-        }
-        Log_info("E1002: [%s] done %dms", label, wc * 10 + 10);
-    };
-
-    // send_buffer: 128-byte chunks matching esp32-photoframe
     auto send_buffer = [&spi_dev, &spi_wr](const uint8_t *data, int len) {
         const uint8_t *ptr = data;
         int rem = len;
@@ -341,14 +215,13 @@ void display_init(void)
         }
     };
 
-    // === display_update_cycle (matching esp32-photoframe exactly) ===
     // 1. Hardware reset
     gpio_set_level((gpio_num_t)EPD_RST_PIN, 1); vTaskDelay(pdMS_TO_TICKS(50));
     gpio_set_level((gpio_num_t)EPD_RST_PIN, 0); vTaskDelay(pdMS_TO_TICKS(20));
     gpio_set_level((gpio_num_t)EPD_RST_PIN, 1); vTaskDelay(pdMS_TO_TICKS(50));
-    wait_busy("reset");
+    spectra6_wait_busy("reset");
 
-    // 2. Init sequence
+    // 2. Init sequence (esp32-photoframe ED2208-GCA values)
     cmd_data(0xAA, (const uint8_t[]){0x49, 0x55, 0x20, 0x08, 0x09, 0x18}, 6);
     cmd_data(0x01, (const uint8_t[]){0x3F}, 1);
     cmd_data(0x00, (const uint8_t[]){0x5F, 0x69}, 2);
@@ -362,50 +235,112 @@ void display_init(void)
     cmd_data(0x61, (const uint8_t[]){0x03, 0x20, 0x01, 0xE0}, 4);
     cmd_data(0x84, (const uint8_t[]){0x01}, 1);
     cmd_data(0xE3, (const uint8_t[]){0x2F}, 1);
-    wait_busy("init");
-    Log_info("E1002: init done");
+    spectra6_wait_busy("init");
 
-    // 3. Data — 6 color bands (800x480, 80 rows each)
-    // Spectra 6 nibble values: 0=Black, 1=White, 2=Yellow, 3=Red, 5=Blue, 6=Green
+    // 3. Send framebuffer data from bb_epaper (4bpp, 192000 bytes)
     send_cmd(0x10);
-    {
-        const uint8_t colors[6] = {0x00, 0x11, 0x22, 0x33, 0x55, 0x66};
-        // Black, White, Yellow, Red, Blue, Green — 80 rows each
-        uint8_t row[400]; // 800 pixels / 2 per byte
-        for (int band = 0; band < 6; band++) {
-            memset(row, colors[band], 400);
-            for (int r = 0; r < 80; r++) {
-                send_buffer(row, 400);
-            }
-        }
-        Log_info("E1002: 6-color test pattern sent");
+    uint8_t *fb = (uint8_t *)bbep.getBuffer();
+    if (fb) {
+        // bb_epaper 4bpp buffer: 800/2 * 480 = 192000 bytes
+        send_buffer(fb, 192000);
+    } else {
+        // No buffer — send all white
+        uint8_t row[400];
+        memset(row, 0x11, 400);
+        for (int r = 0; r < 480; r++) send_buffer(row, 400);
     }
-    wait_busy("data");
+    spectra6_wait_busy("data");
 
     // 4. Power on
     send_cmd(0x04);
-    wait_busy("power_on");
-    Log_info("E1002: PON done");
+    spectra6_wait_busy("PON");
 
-    // 5. Display refresh
+    // 5. Display refresh (15-30 seconds)
     cmd_data(0x12, (const uint8_t[]){0x00}, 1);
-    Log_info("E1002: DRF sent, waiting...");
-    wait_busy("refresh");
-    Log_info("E1002: REFRESH COMPLETE!");
+    Log_info("spectra6_update: refreshing...");
+    spectra6_wait_busy("refresh");
 
     // 6. Power off + deep sleep
     cmd_data(0x02, (const uint8_t[]){0x00}, 1);
-    wait_busy("power_off");
+    spectra6_wait_busy("POFF");
     cmd_data(0x07, (const uint8_t[]){0xA5}, 1);
 
-    // Cleanup SPI so bb_epaper can use it
-    spi_bus_remove_device(spi_dev);
-    spi_bus_free(SPI2_HOST);
-    Log_info("E1002: ESP-IDF SPI test complete");
+    // SPI bus kept open for reuse across refreshes
+    Log_info("spectra6_update: done");
+}
+
+// Draw 6-color indicator boxes on E1002 embedded screens
+static void spectra6_draw_color_boxes(void)
+{
+    // bb_epaper color indices (NOT raw nibble values)
+    const uint8_t colors[] = {BBEP_BLACK, BBEP_WHITE, BBEP_YELLOW, BBEP_RED, BBEP_BLUE, BBEP_GREEN};
+    int box_w = 36, box_h = 28, gap = 6;
+    int totalW = 6 * box_w + 5 * gap;
+    int startX = (bbep.width() - totalW) / 2; // centered
+    int startY = 10;
+
+    // Row 1: Pure colors
+    for (int c = 0; c < 6; c++) {
+        int x = startX + c * (box_w + gap);
+        bbep.fillRect(x, startY, box_w, box_h, colors[c]);
+        if (c == 1) bbep.drawRect(x, startY, box_w, box_h, BBEP_BLACK);
     }
-#endif
+
+    // Row 2: Blended/dithered colors (checkerboard pattern)
+    // Orange, Purple, Pink, LightBlue, LightGreen, Teal
+    const uint8_t blendA[] = {BBEP_RED,    BBEP_RED,  BBEP_RED,    BBEP_BLUE,  BBEP_GREEN,  BBEP_BLUE};
+    const uint8_t blendB[] = {BBEP_YELLOW, BBEP_BLUE, BBEP_WHITE,  BBEP_WHITE, BBEP_YELLOW, BBEP_GREEN};
+    int row2Y = startY + box_h + gap;
+    for (int c = 0; c < 6; c++) {
+        int bx = startX + c * (box_w + gap);
+        for (int py = 0; py < box_h; py++) {
+            for (int px = 0; px < box_w; px++) {
+                uint8_t col = ((px + py) & 1) ? blendB[c] : blendA[c];
+                bbep.drawPixel(bx + px, row2Y + py, col);
+            }
+        }
+    }
+
+    // Row 3: 3-color blends (dithered, cycling through 3 colors)
+    const uint8_t tri_a[] = {BBEP_RED,    BBEP_RED,   BBEP_YELLOW, BBEP_BLACK, BBEP_BLACK,  BBEP_WHITE};
+    const uint8_t tri_b[] = {BBEP_YELLOW, BBEP_BLUE,  BBEP_BLUE,   BBEP_WHITE, BBEP_GREEN,  BBEP_GREEN};
+    const uint8_t tri_c[] = {BBEP_BLUE,   BBEP_GREEN, BBEP_GREEN,  BBEP_RED,   BBEP_YELLOW, BBEP_RED};
+    int row3Y = row2Y + box_h + gap;
+    for (int c = 0; c < 6; c++) {
+        int bx = startX + c * (box_w + gap);
+        for (int py = 0; py < box_h; py++) {
+            for (int px = 0; px < box_w; px++) {
+                uint8_t col;
+                int idx = (px + py) % 3;
+                if (idx == 0) col = tri_a[c];
+                else if (idx == 1) col = tri_b[c];
+                else col = tri_c[c];
+                bbep.drawPixel(bx + px, row3Y + py, col);
+            }
+        }
+    }
+}
+#endif // BOARD_SEEED_RETERMINAL_E1002
+
+/**
+ * @brief Function to init the display
+ * @param none
+ * @return none
+ */
+void display_init(void)
+{
+    Log_info("dev module start");
+    iTempProfile = preferences.getUInt(PREFERENCES_TEMP_PROFILE, TEMP_PROFILE_DEFAULT);
+    Log_info("Saved temperature profile: %d", iTempProfile);
+#ifdef BB_EPAPER
     bbep.setPanelType(dpList[iTempProfile].OneBit); // must be set BEFORE calling initio
+#ifdef BOARD_SEEED_RETERMINAL_E1002
+    // E1002: skip initIO — Arduino SPI doesn't work on this hardware.
+    // We only need setPanelType for buffer dimensions/format.
+    // spectra6_update() uses ESP-IDF SPI directly.
+#else
     bbep.initIO(EPD_DC_PIN, EPD_RST_PIN, EPD_BUSY_PIN, EPD_CS_PIN, EPD_MOSI_PIN, EPD_SCK_PIN, 8000000);
+#endif
 #else
     bbep.initPanel(BB_PANEL_EPDIY_V7_16); //, 26000000);
     bbep.setPanelSize(1872, 1404, BB_PANEL_FLAG_MIRROR_X);
@@ -453,11 +388,15 @@ void display_reset(void)
     bbep.fillScreen(BBEP_WHITE);
     bbep.setLightSleep(true);
 #ifdef BB_EPAPER
+#ifdef BOARD_SEEED_RETERMINAL_E1002
+    spectra6_update();
+#else
     if (!apiDisplayResult.response.maximum_compatibility) {
         bbep.refresh(REFRESH_FAST, true);
     } else {
         bbep.refresh(REFRESH_FULL, true); // incompatible panel
     }
+#endif
 #else
     bbep.fullUpdate();
 #endif
@@ -1675,11 +1614,13 @@ void display_show_image(uint8_t *image_buffer, int data_size, bool bWait)
 #endif
         }
 #ifdef BB_EPAPER
+#ifndef BOARD_SEEED_RETERMINAL_E1002
 #ifdef BOARD_XTEINK_X4
         bbep.writePlane(PLANE_FALSE_DIFF);
 #else
         bbep.writePlane(); // send image data to the EPD
 #endif
+#endif // !E1002 — spectra6_update reads buffer directly
         iRefreshMode = REFRESH_PARTIAL;
 #endif
         iUpdateCount = 1; // use partial update
@@ -1705,7 +1646,11 @@ void display_show_image(uint8_t *image_buffer, int data_size, bool bWait)
     if (!bWait) iRefreshMode = REFRESH_PARTIAL; // fast update when showing loading screen
     Log_info("%s [%d]: EPD refresh mode: %d\r\n", __FILE__, __LINE__, iRefreshMode);
     bbep.setLightSleep(true);
+#ifdef BOARD_SEEED_RETERMINAL_E1002
+    spectra6_update();
+#else
     bbep.refresh(iRefreshMode, bWait);
+#endif
     if ((bbep.getPanelType() == EP426_800x480 || bbep.getPanelType() == EP397_800x480) && iRefreshMode == REFRESH_PARTIAL) {
         i426Workaround = 1; // need to re-initialize the controller for another update before sleeping
     }
@@ -2078,8 +2023,12 @@ void display_show_msg(uint8_t *image_buffer, MSG message_type)
         break;
     }
 #ifdef BB_EPAPER
+#ifdef BOARD_SEEED_RETERMINAL_E1002
+    spectra6_update();
+#else
     bbep.writePlane(PLANE_0);
     bbep.refresh(REFRESH_FULL, true);
+#endif
     bbep.freeBuffer();
 #else
     bbep.fullUpdate();
@@ -2170,8 +2119,12 @@ void display_show_msg_qa(uint8_t *image_buffer, const float *voltage, const floa
     bbep.print(qaResultString);
 
     #ifdef BB_EPAPER
+    #ifdef BOARD_SEEED_RETERMINAL_E1002
+        spectra6_update();
+    #else
         bbep.writePlane(PLANE_0);
         bbep.refresh(REFRESH_FULL, true);
+    #endif
         bbep.freeBuffer();
     #else
         bbep.fullUpdate();
@@ -2213,12 +2166,16 @@ void display_show_msg(uint8_t *image_buffer, MSG message_type, String friendly_i
         Log_info("Display set to white");
         bbep.fillScreen(BBEP_WHITE);
 #ifdef BB_EPAPER
+#ifdef BOARD_SEEED_RETERMINAL_E1002
+        spectra6_update();
+#else
         bbep.writePlane(PLANE_0);
         if (!apiDisplayResult.response.maximum_compatibility) {
             bbep.refresh(REFRESH_FAST, true);
         } else {
             bbep.refresh(REFRESH_FULL, true);
         }
+#endif
 #else
         bbep.fullUpdate();
 #endif
@@ -2331,8 +2288,13 @@ void display_show_msg(uint8_t *image_buffer, MSG message_type, String friendly_i
     }
     Log_info("Start drawing...");
 #ifdef BB_EPAPER
+#ifdef BOARD_SEEED_RETERMINAL_E1002
+    spectra6_draw_color_boxes();
+    spectra6_update();
+#else
     bbep.writePlane(PLANE_0);
     bbep.refresh(REFRESH_FULL, true);
+#endif
     bbep.freeBuffer();
 #else
     bbep.fullUpdate();
@@ -2349,7 +2311,10 @@ void display_sleep(void)
 {
     Log_info("Goto Sleep...");
 #ifdef BB_EPAPER
+#ifndef BOARD_SEEED_RETERMINAL_E1002
     bbep.sleep(DEEP_SLEEP);
+#endif
+    // E1002: panel already in deep sleep after spectra6_update()
 #else
     bbep.einkPower(0);
     bbep.deInit();
