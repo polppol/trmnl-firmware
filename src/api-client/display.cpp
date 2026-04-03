@@ -79,6 +79,31 @@ void addHeaders(HTTPClient &https, ApiDisplayInputs &inputs)
     Log_info("%s [%d] Sensor data not available", __FILE__, __LINE__);
   }
   free(szTemp);
+
+  // Simple TEMPERATURE/HUMIDITY headers for custom BYOS servers
+  // (the SENSORS header above is structured for TRMNL cloud — these are plain values)
+  {
+    float temp = NAN;
+    int hum = 0;
+    if (lastTemp != 0) {           // bb_temperature sensor (SHT3X, BME280, etc.)
+      temp = (float)lastTemp / 10.0f;
+      hum = lastHumid;
+    } else if (lastSCDTemp != 0) { // SCD41 fallback
+      temp = (float)lastSCDTemp / 10.0f;
+      hum = lastSCDHumid;
+    }
+    if (!isnan(temp)) {
+      https.addHeader("TEMPERATURE", String(temp, 1));
+      https.addHeader("HUMIDITY", String(hum));
+
+        Log_info("Added headers:\n\r"
+           "TEMPERATURE: %s\n\r"
+           "HUMIDITY: %d\n\r",
+           String(temp, 1).c_str(),
+           hum);
+
+    }
+  }
 #endif // SENSOR_SDA
 
   if (inputs.specialFunction != SF_NONE)

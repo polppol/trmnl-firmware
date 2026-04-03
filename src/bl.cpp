@@ -40,6 +40,7 @@
 #include "loading.h"
 #include <wifi-helpers.h>
 #ifdef SENSOR_SDA
+#include <Wire.h>
 #include <bb_scd41.h>
 #include <bb_temperature.h>
 SCD41 scd41;
@@ -141,10 +142,12 @@ void bl_init(void)
     vTaskDelay(3); // allow time to reinitialize
     scd41.triggerSample(); // trigger a 'one-shot' sample that takes about 5 seconds to complete
   }
-  if (bbt.init(SENSOR_SDA, SENSOR_SCL) == BBT_SUCCESS) {
-    iSensorType = bbt.type();
-    Log.info("%s [%d]: supported sensor found! (%d)\r\n", __FILE__, __LINE__, iSensorType);
-    bbt.start(); // start the sensor
+  // Initialize SHT40 manually
+  Wire.begin(SENSOR_SDA, SENSOR_SCL);
+  Wire.beginTransmission(0x44); // SHT4x standard I2C address
+  if (Wire.endTransmission() == 0) {
+    iSensorType = 5; // Hijack the "SHT3X" slot so display.cpp formats the string properly
+    Log.info("%s [%d]: SHT40 sensor found on I2C bus!\r\n", __FILE__, __LINE__);
   }
   if (!bCO2 && iSensorType < 0) {
     Log.info("%s [%d]: No sensor found on I2C bus %d/%d\r\n", __FILE__, __LINE__, SENSOR_SDA, SENSOR_SCL);
@@ -169,20 +172,39 @@ void bl_init(void)
     }
     scd41.shutdown(); // conserve power since we completed getting a sample ready for the next TRMNL wakeup
   }
-  if (iSensorType >= 0) {
-      BBT_SAMPLE bbts;
-      if (bbt.getSample(&bbts) == BBT_SUCCESS) {
-        time((time_t *)&lastTime); // get the UTC epoch time that the same was captured
-        lastTemp = bbts.temperature;
-        lastHumid = bbts.humidity;
-        lastPressure = bbts.pressure;
-        lastType = iSensorType;
-        Log.info("%s [%d]: Got bb_temperature sample: Temp = %d.%dC\r\n", __FILE__, __LINE__, lastTemp/10, lastTemp % 10);
+  if (iSensorType == 5) {
+      // 1. Send SHT40 High Precision Measurement Command
+      Wire.beginTransmission(0x44);
+      Wire.write(0xFD);
+      Wire.endTransmission();
+      
+      // 2. Wait for the sensor to process (max 8.2ms per datasheet)
+      delay(15); 
+      
+      // 3. Read the 6 bytes of data
+      Wire.requestFrom((uint16_t)0x44, (uint8_t)6);
+      if (Wire.available() >= 6) {
+        uint16_t t_ticks = (Wire.read() << 8) | Wire.read();
+        Wire.read(); // Skip Temperature CRC
+        uint16_t rh_ticks = (Wire.read() << 8) | Wire.read();
+        Wire.read(); // Skip Humidity CRC
+        
+        // 4. Calculate standard SHT4x Math
+        float t_celsius = -45.0f + 175.0f * ((float)t_ticks / 65535.0f);
+        float rh_percent = -6.0f + 125.0f * ((float)rh_ticks / 65535.0f);
+        
+        time((time_t *)&lastTime); 
+        lastTemp = (int)(t_celsius * 10.0f);
+        lastHumid = (int)rh_percent;
+        lastPressure = 0;
+        lastType = iSensorType; 
+        
+        Log.info("%s [%d]: Got SHT40 sample: Temp = %d.%dC, Humid = %d%%\r\n", __FILE__, __LINE__, lastTemp/10, lastTemp % 10, lastHumid);
       } else {
         lastType = -1;
-        Log.info("%s [%d]: bb_temperature sample failed\r\n", __FILE__, __LINE__);
+        Log.info("%s [%d]: SHT40 sample failed\r\n", __FILE__, __LINE__);
       }
-      bbt.stop(); // turn off the sensor to conserve power
+      // Note: SHT40 automatically returns to a low-power idle state, no bbt.stop() needed.
   }
 #endif // SENSOR_SDA
 #if defined(BOARD_SEEED_XIAO_ESP32C3)

@@ -132,6 +132,10 @@
    #define EPD_RST_PIN  12
    #define EPD_DC_PIN   11
    #define EPD_BUSY_PIN 13
+   // I2C for onboard SHT3X temp/humidity sensor (XIAO ESP32S3 default Wire pins)
+   // GPIO 5/6 are free — not used by EPD on reTerminal boards
+   #define SENSOR_SDA 19
+   #define SENSOR_SCL 20
 #else
    #error "Board type not defined. Please define BOARD_WAVESHARE_ESP32_DRIVER or BOARD_TRMNL or BOARD_SEEED_XIAO_ESP32C3 or BOARD_SEEED_XIAO_ESP32S3 in platformio.ini build_flags."
 #endif
