@@ -29,6 +29,21 @@ HttpHeaderList buildDisplayRequestHeaders(ApiDisplayInputs &inputs) {
     Log_info("%s [%d] Sensor data not available", __FILE__, __LINE__);
   }
 
+  const auto &readings = sensor().readings();
+  if (readings.sensorType >= 0) {
+    char buf[16];
+    snprintf(buf, sizeof(buf), "%.1f", (float)readings.temperature / 10.0f);
+    headers.push_back({"TEMPERATURE", buf});
+    snprintf(buf, sizeof(buf), "%d", readings.humidity);
+    headers.push_back({"HUMIDITY", buf});
+  } else if (readings.co2 != 0) {
+    char buf[16];
+    snprintf(buf, sizeof(buf), "%.1f", (float)readings.scdTemperature / 10.0f);
+    headers.push_back({"TEMPERATURE", buf});
+    snprintf(buf, sizeof(buf), "%d", readings.scdHumidity);
+    headers.push_back({"HUMIDITY", buf});
+  }
+
   return headers;
 }
 

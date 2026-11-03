@@ -428,7 +428,14 @@ static void use_message_font(void) {
 }
 
 // Refreshes the panel with the finished status message
-static void present_status_message(void) {
+static void present_status_message(MSG message_type) {
+#ifdef BOARD_SEEED_RETERMINAL_E1002
+  if (message_type != FILL_WHITE) {
+    spectra6_draw_color_boxes();
+  }
+#else
+  (void)message_type;
+#endif
 #ifdef BB_EPAPER
   if (!display_update_epaper(REFRESH_FULL, true, true, PLANE_0)) {
     Log_error("display_show_msg: e-paper update failed");
@@ -540,7 +547,7 @@ void display_show_msg(uint8_t *image_buffer, MSG message_type, const char *messa
   default:
     break;
   }
-  present_status_message();
+  present_status_message(message_type);
 }
 
 void display_show_msg_qa(const float *voltage, const float *temperature, bool qa_result) {
@@ -678,6 +685,9 @@ static void draw_mac_not_registered_setup_message(String message) {
 
 // Refreshes the panel with the finished setup message
 static void present_setup_message(void) {
+#ifdef BOARD_SEEED_RETERMINAL_E1002
+  spectra6_draw_color_boxes();
+#endif
 #ifdef BB_EPAPER
   if (!display_update_epaper(REFRESH_FULL, true, true, PLANE_0)) {
     Log_error("display_show_msg2: e-paper update failed");

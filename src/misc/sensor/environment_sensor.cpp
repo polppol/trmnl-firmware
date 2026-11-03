@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <Wire.h>
 #include <config.h>
 #include <esp_sleep.h>
 #include <misc/sensor.h>
@@ -32,10 +33,6 @@ void EnvironmentSensor::init(TRMNL_DEVICE *pDevice) {
     sensorType = _bbt.type();
     Log_info("supported sensor found! (%d)", sensorType);
     _bbt.start(); // start the sensor
-  }
-  if (!co2Found && sensorType < 0) {
-    Log_info("No sensor found on I2C bus %d/%d", pDevice->sensor_sda, pDevice->sensor_scl);
-    return;
   }
 
   if (co2Found) {
@@ -71,6 +68,39 @@ void EnvironmentSensor::init(TRMNL_DEVICE *pDevice) {
       Log_info("bb_temperature sample failed");
     }
     _bbt.stop(); // turn off the sensor to conserve power
+  }
+  if (_readings.sensorType < 0) {
+    // Fallback: try direct hardware I2C SHT40 read at 0x44 (e.g. reTerminal E1001/E1002 onboard SHT40)
+    Wire.begin(pDevice->sensor_sda, pDevice->sensor_scl);
+    Wire.beginTransmission(0x44);
+    if (Wire.endTransmission() == 0) {
+      Wire.beginTransmission(0x44);
+      Wire.write(0xFD); // high precision measure command
+      if (Wire.endTransmission() == 0) {
+        delay(10);
+        if (Wire.requestFrom((uint8_t)0x44, (uint8_t)6) == 6) {
+          uint16_t rawT = (Wire.read() << 8) | Wire.read();
+          Wire.read(); // CRC
+          uint16_t rawRH = (Wire.read() << 8) | Wire.read();
+          Wire.read(); // CRC
+          _readings.sampledAt = (int)time(nullptr);
+          _readings.temperature = (int)(-450 + 1750L * rawT / 65535);
+          _readings.humidity = (int)(-6 + 125L * rawRH / 65535);
+          if (_readings.humidity < 0) _readings.humidity = 0;
+          if (_readings.humidity > 100) _readings.humidity = 100;
+          _readings.pressure = 0;
+          _readings.sensorType = 11; // SHT40
+          Log_info("SHT40 read via Wire: Temp = %d.%dC, RH = %d%%",
+                   _readings.temperature / 10, abs(_readings.temperature % 10), _readings.humidity);
+          Wire.end();
+          return;
+        }
+      }
+    }
+    Wire.end();
+    if (!co2Found) {
+      Log_info("No sensor found on I2C bus %d/%d", pDevice->sensor_sda, pDevice->sensor_scl);
+    }
   }
 }
 

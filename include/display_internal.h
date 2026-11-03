@@ -14,4 +14,7 @@ void display_sleep(uint32_t u32Millis);
 #ifdef BB_EPAPER
 bool display_update_epaper(int refreshMode, bool wait, bool writePlane = false, uint8_t plane = PLANE_0);
 void display_prepare_message(void);
+#ifdef BOARD_SEEED_RETERMINAL_E1002
+void spectra6_draw_color_boxes(void);
+#endif
 #endif // BB_EPAPER

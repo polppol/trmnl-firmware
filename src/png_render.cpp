@@ -62,6 +62,7 @@ int png_draw_6clr(PNGDRAW *pDraw) {
   } // switch on pixel type
   iDelta = iBpp / 8;
   s = pDraw->pPixels;
+  uint8_t rgbRow[800 * 3];
   for (x = 0; x < iWidth; x++) { // slower code, but less code :)
     switch (iBpp) {
     case 24:
@@ -126,17 +127,16 @@ int png_draw_6clr(PNGDRAW *pDraw) {
         g = pPal[1];
         b = pPal[2];
       } else {
-        r = g = b = ((s[0] << (x & 7)) & 0x80);
+        r = g = b = ((s[0] << (x & 7)) & 0x80) ? 0xff : 0x00;
       }
       if ((x & 7) == 7) s++;
       break;
     } // switch on bpp
-    if (bRotated) {
-      bbep.drawPixel(bbep.width() - 1 - y, x, GetSpectraPixel(r, g, b));
-    } else {
-      bbep.drawPixel(x, y, GetSpectraPixel(r, g, b));
-    }
+    rgbRow[x * 3 + 0] = r;
+    rgbRow[x * 3 + 1] = g;
+    rgbRow[x * 3 + 2] = b;
   } // for x
+  spectra6_fs_dither_row(rgbRow, y, iWidth, bRotated);
   return 1; // continue decoding
 } /* png_draw_6clr() */
 
@@ -330,21 +330,41 @@ int png_draw(PNGDRAW *pDraw) {
         }
       } // for x
     } else { // normal 0/1 split plane
-      ucMask = (iPlane == PNG_2_BIT_0) ? 0x40 : 0x80; // lower or upper source bit
-      for (x = 0; x < iWidth; x++) {
-        uc <<= 1;
-        if (src & ucMask) {
-          uc |= 1; // high bit of source pair
-        }
-        src <<= 2;
-        if ((x & 3) == 3) { // new input byte
-          src = *s++;
-          src ^= ucInvert;
-        }
-        if ((x & 7) == 7) { // new output byte
-          *d++ = uc;
-        }
-      } // for x
+      const int panel = bbep.getPanelType();
+      if (panel == EP75_800x480_4GRAY || panel == EP75_800x480_4GRAY_GEN2) {
+        // EP75 4-gray LUT has middle grays swapped: remap 00->00, 01->10, 10->01, 11->11
+        const uint8_t ucTranslate[4] = {0, 2, 1, 3};
+        uint8_t shift = (iPlane == PNG_2_BIT_0) ? 0 : 1;
+        for (x = 0; x < iWidth; x++) {
+          uc <<= 1;
+          uint8_t pix = (src >> 6) & 3;
+          uc |= (ucTranslate[pix] >> shift) & 1;
+          src <<= 2;
+          if ((x & 3) == 3) { // new input byte
+            src = *s++;
+            src ^= ucInvert;
+          }
+          if ((x & 7) == 7) { // new output byte
+            *d++ = uc;
+          }
+        } // for x
+      } else {
+        ucMask = (iPlane == PNG_2_BIT_0) ? 0x40 : 0x80; // lower or upper source bit
+        for (x = 0; x < iWidth; x++) {
+          uc <<= 1;
+          if (src & ucMask) {
+            uc |= 1; // high bit of source pair
+          }
+          src <<= 2;
+          if ((x & 3) == 3) { // new input byte
+            src = *s++;
+            src ^= ucInvert;
+          }
+          if ((x & 7) == 7) { // new output byte
+            *d++ = uc;
+          }
+        } // for x
+      }
     }
   }
   bbep.writeData(pTemp, (iWidth + 7) / 8);
@@ -559,17 +579,22 @@ int png_to_epd(const uint8_t *pPNG, int iDataSize, bool bPrevious) {
 #ifdef BB_EPAPER
       if (bbep.capabilities() & BBEP_7COLOR) { // Spectra6 panels
         CreateSpectra6Pal(); // create a fast color matching palette
+        bbep.setMemoryMode(BB_MODE_NATIVE); // ensure native 4-bpp buffer mode for 6-color image
         if (bbep.allocBuffer() != BBEP_SUCCESS) {
           Log_error("%s [%d]: bbep.AllocBuffer failed!\n\r", __FILE__, __LINE__);
           return -1;
         }
         bbep.fillScreen(BBEP_WHITE); // in case the image is too small - undrawn areas will be white
-        Log_info("%s [%d]: decoding for 6-color EPD\r\n", __FILE__, __LINE__);
+        Log_info("%s [%d]: decoding for 6-color EPD (Floyd-Steinberg dithering)\r\n", __FILE__, __LINE__);
+        spectra6_fs_init(png->getWidth());
         png->openRAM((uint8_t *)pPNG, iDataSize, png_draw_6clr);
         png->decode(NULL, 0);
         png->close();
+        spectra6_fs_free();
         delete (png); // free the decoder instance
+#ifndef BOARD_SEEED_RETERMINAL_E1002
         bbep.writePlane(); // send the pixels to the display panel
+#endif
         return REFRESH_FAST;
       }
 #ifdef BOARD_TRMNL_4CLR

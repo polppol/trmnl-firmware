@@ -1,6 +1,9 @@
 #include <PNGdec.h>
 #include <color_reduce.h>
 #include <epd_driver.h>
+#include <esp_heap_caps.h>
+#include <globals.h>
+#include <trmnl_log.h>
 
 /**
  * @brief Reduce the bit depth of line of pixels using thresholding (aka simple color mapping)
@@ -162,21 +165,127 @@ unsigned char GetBWYRPixel(int r, int g, int b) {
 } /* GetBWYRPixel() */
 
 //
-// bb_epaper colors to map to Spectra6 colors
-// The RGB values are not correct for the panel, but for simple mapping
-// these work best. These get mapped from bb_epaper color indices to
-// Spectra6 color indices by the setPixel() method.
+// Calibrated Spectra6 palette colors (measured panel reflectance)
+// Indices match bb_epaper color constants:
+// 0=Black, 1=White, 2=Yellow, 3=Red, 4=Blue, 5=Green
 //
 // clang-format off
 const int iSpectraRGB[] = { // r, g, b
-    0, 0, 0, // black = 0
-    192,192,192, // white = 1
-    192,192,0, // yellow = 2
-    192,0,0, // red = 3
-    0,0,192, // blue = 4
-    0,192,0, // green = 5
+    0,   0,   0,   // black = 0
+    255, 255, 255, // white = 1
+    255, 243, 56,  // yellow = 2
+    191, 0,   0,   // red = 3
+    100, 64,  255, // blue = 4
+    67,  138, 28,  // green = 5
+};
+
+static const int spectra6_palette[6][3] = {
+    {  0,   0,   0}, // 0: Black  -> BBEP_BLACK  (0)
+    {255, 255, 255}, // 1: White  -> BBEP_WHITE  (1)
+    {255, 243,  56}, // 2: Yellow -> BBEP_YELLOW (2)
+    {191,   0,   0}, // 3: Red    -> BBEP_RED    (3)
+    {100,  64, 255}, // 4: Blue   -> BBEP_BLUE   (4)
+    { 67, 138,  28}, // 5: Green  -> BBEP_GREEN  (5)
 };
 // clang-format on
+
+uint8_t spectra6_find_closest(int r, int g, int b) {
+  int min_dist = 0x7fffffff;
+  uint8_t best = 0;
+  for (int i = 0; i < 6; i++) {
+    int dr = r - spectra6_palette[i][0];
+    int dg = g - spectra6_palette[i][1];
+    int db = b - spectra6_palette[i][2];
+    int dist = dr * dr + dg * dg + db * db;
+    if (dist < min_dist) {
+      min_dist = dist;
+      best = i;
+    }
+  }
+  return best;
+}
+
+// Floyd-Steinberg error buffers for streaming PNG decode (2 rows of RGB int16_t errors)
+static int16_t *s_fs_err_cur = nullptr;
+static int16_t *s_fs_err_nxt = nullptr;
+static int s_fs_width = 0;
+
+bool spectra6_fs_init(int width) {
+  spectra6_fs_free();
+  s_fs_width = width;
+  size_t sz = (width + 2) * 3 * sizeof(int16_t);
+  s_fs_err_cur = (int16_t *)heap_caps_calloc(1, sz, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  s_fs_err_nxt = (int16_t *)heap_caps_calloc(1, sz, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (!s_fs_err_cur || !s_fs_err_nxt) {
+    if (!s_fs_err_cur) s_fs_err_cur = (int16_t *)calloc(1, sz);
+    if (!s_fs_err_nxt) s_fs_err_nxt = (int16_t *)calloc(1, sz);
+  }
+  if (!s_fs_err_cur || !s_fs_err_nxt) {
+    Log_error("spectra6_fs_init: failed to alloc error buffers");
+    spectra6_fs_free();
+    return false;
+  }
+  return true;
+}
+
+void spectra6_fs_free(void) {
+  if (s_fs_err_cur) {
+    free(s_fs_err_cur);
+    s_fs_err_cur = nullptr;
+  }
+  if (s_fs_err_nxt) {
+    free(s_fs_err_nxt);
+    s_fs_err_nxt = nullptr;
+  }
+  s_fs_width = 0;
+}
+
+static inline int clamp255(int v) {
+  return v < 0 ? 0 : (v > 255 ? 255 : v);
+}
+
+void spectra6_fs_dither_row(uint8_t *rgbRow, int y, int width, bool bRotated) {
+  for (int x = 0; x < width; x++) {
+    int idx = (x + 1) * 3;
+    int r = clamp255(rgbRow[x * 3 + 0] + s_fs_err_cur[idx + 0]);
+    int g = clamp255(rgbRow[x * 3 + 1] + s_fs_err_cur[idx + 1]);
+    int b = clamp255(rgbRow[x * 3 + 2] + s_fs_err_cur[idx + 2]);
+
+    uint8_t ci = spectra6_find_closest(r, g, b);
+
+    if (bRotated) {
+      bbep.drawPixel(bbep.width() - 1 - y, x, ci);
+    } else {
+      bbep.drawPixel(x, y, ci);
+    }
+
+    int er = r - spectra6_palette[ci][0];
+    int eg = g - spectra6_palette[ci][1];
+    int eb = b - spectra6_palette[ci][2];
+
+    // Right (x+1, y): 7/16
+    s_fs_err_cur[idx + 3 + 0] += (er * 7) >> 4;
+    s_fs_err_cur[idx + 3 + 1] += (eg * 7) >> 4;
+    s_fs_err_cur[idx + 3 + 2] += (eb * 7) >> 4;
+    // Bottom-left (x-1, y+1): 3/16
+    s_fs_err_nxt[idx - 3 + 0] += (er * 3) >> 4;
+    s_fs_err_nxt[idx - 3 + 1] += (eg * 3) >> 4;
+    s_fs_err_nxt[idx - 3 + 2] += (eb * 3) >> 4;
+    // Bottom (x, y+1): 5/16
+    s_fs_err_nxt[idx + 0] += (er * 5) >> 4;
+    s_fs_err_nxt[idx + 1] += (eg * 5) >> 4;
+    s_fs_err_nxt[idx + 2] += (eb * 5) >> 4;
+    // Bottom-right (x+1, y+1): 1/16
+    s_fs_err_nxt[idx + 3 + 0] += (er * 1) >> 4;
+    s_fs_err_nxt[idx + 3 + 1] += (eg * 1) >> 4;
+    s_fs_err_nxt[idx + 3 + 2] += (eb * 1) >> 4;
+  }
+  int16_t *tmp = s_fs_err_cur;
+  s_fs_err_cur = s_fs_err_nxt;
+  s_fs_err_nxt = tmp;
+  memset(s_fs_err_nxt, 0, (s_fs_width + 2) * 3 * sizeof(int16_t));
+}
+
 // Map the Spectra6 palette to the closest RGB333 values
 void CreateSpectra6Pal(void) {
   int i, j;
@@ -208,11 +317,6 @@ void CreateSpectra6Pal(void) {
 // Convert the RGB value into one of 6 Spectra6 colors
 //
 uint8_t GetSpectraPixel(int r, int g, int b) {
-  uint8_t c;
-  uint16_t rgb333;
-
-  rgb333 = (r >> 5) + ((g & 0xe0) >> 2) + ((b & 0xe0) << 1);
-  c = u8SpectraPal[rgb333];
-  return c;
+  return spectra6_find_closest(r, g, b);
 } /* GetSpectraPixel() */
 #endif // BB_EPAPER
